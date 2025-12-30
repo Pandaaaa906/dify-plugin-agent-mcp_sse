@@ -111,10 +111,16 @@ class ReActAgentStrategy(AgentStrategy):
                     for item in msg.content
                     if (
                             item.type == PromptMessageContentType.TEXT
-                            or (item.type == PromptMessageContentType.IMAGE and ModelFeature.VISION in model.entity.features)
+                            or (item.type in {
+                                PromptMessageContentType.IMAGE, PromptMessageContentType.VIDEO,
+                                PromptMessageContentType.DOCUMENT,
+                            } and ModelFeature.VISION in model.entity.features)
+                            or (item.type == PromptMessageContentType.AUDIO and ModelFeature.AUDIO in model.entity.features)
+                            or (item.type == PromptMessageContentType.VIDEO and ModelFeature.VIDEO in model.entity.features)
+                            or (item.type == PromptMessageContentType.DOCUMENT and ModelFeature.DOCUMENT in model.entity.features)
                     )
                 ]
-                new_msg = PromptMessage(
+                new_msg = msg.__class__(
                     role=msg.role,
                     content=filtered_content,
                     name=msg.name,
@@ -510,7 +516,6 @@ class ReActAgentStrategy(AgentStrategy):
         :param tool_instances: tool instances
         :param mcp_tool_instances: MCP tool instances
         :param message_file_ids: message file ids
-        :param trace_manager: trace manager
         :return: observation, meta
         """
         # action is tool call, invoke tool
@@ -527,11 +532,17 @@ class ReActAgentStrategy(AgentStrategy):
             try:
                 tool_call_args = orjson.loads(tool_call_args)
             except orjson.JSONDecodeError as e:
-                params = [
-                    param.name
-                    for param in tool_instance.parameters
-                    if param.form == ToolParameter.ToolParameterForm.LLM
-                ]
+                if tool_instance is not None:
+                    params = [
+                        param.name
+                        for param in tool_instance.parameters
+                        if param.form == ToolParameter.ToolParameterForm.LLM
+                    ]
+                else:
+                    params = [
+                        param
+                        for param in mcp_tool_instance.get('inputSchema', {}).get('properties', {}).keys()
+                    ]
                 if len(params) > 1:
                     raise ValueError("tool call args is not a valid json string") from e
                 tool_call_args = {params[0]: tool_call_args} if len(params) == 1 else {}
