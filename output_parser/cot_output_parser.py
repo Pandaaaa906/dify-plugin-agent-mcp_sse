@@ -1,10 +1,21 @@
 import json
 import re
 from collections.abc import Generator
-from typing import Union
+from typing import Union, Optional
 
+import json_repair
 from dify_plugin.entities.model.llm import LLMResultChunk
 from dify_plugin.interfaces.agent import AgentScratchpadUnit
+
+
+p_final_answer = re.compile(r'(?<="action":)\s*"final answer"', re.IGNORECASE | re.MULTILINE)
+p_delta_answer = re.compile(r'(?<="action_input":)\s*', re.IGNORECASE | re.MULTILINE)
+
+
+class DeltaFinalAnswer(AgentScratchpadUnit.Action):
+    action_name: str = "Final Answer"
+    action_input: str = ""
+    delta: str
 
 
 class CotAgentOutputParser:
@@ -52,6 +63,16 @@ class CotAgentOutputParser:
             except:
                 return []
 
+        def _maybe_final_str_answer(json_string: str) -> Optional[str]:
+            if (
+                    p_final_answer.search(json_string)
+                    and (m := p_delta_answer.search(json_string))
+                    and json_string[(idx_end:=m.end()):idx_end+1] in {'"', "'"}
+            ):
+                final_answer = json_repair.loads(json_string, skip_json_loads=True).get('action_input', '')
+                return final_answer
+            return None
+
         code_block_cache = ""
         code_block_delimiter_count = 0
         in_code_block = False
@@ -59,6 +80,8 @@ class CotAgentOutputParser:
         json_quote_count = 0
         in_json = False
         got_json = False
+
+        last_final_answer = ""
 
         action_cache = ""
         action_str = "action:"
@@ -212,6 +235,15 @@ class CotAgentOutputParser:
                     yield delta.replace("`", "")
 
                 index += steps
+
+            if (
+                    (tmp_cache := (code_block_cache if in_code_block else json_cache))
+                    and (final_str_answer := _maybe_final_str_answer(tmp_cache))
+                    and final_str_answer.startswith(last_final_answer)
+            ):
+                delta_final_str_answer = final_str_answer[len(last_final_answer):]
+                yield DeltaFinalAnswer(delta=delta_final_str_answer)
+                last_final_answer = final_str_answer
 
         if code_block_cache:
             yield code_block_cache

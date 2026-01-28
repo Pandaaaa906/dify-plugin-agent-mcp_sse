@@ -5,14 +5,13 @@ from typing import Any, Optional, cast
 import orjson
 import pydantic
 from dify_plugin.entities.agent import AgentInvokeMessage
-from dify_plugin.entities.model import ModelFeature
 from dify_plugin.entities.model.llm import LLMModelConfig, LLMUsage
 from dify_plugin.entities.model.message import (
     AssistantPromptMessage,
     PromptMessage,
     SystemPromptMessage,
     UserPromptMessage,
-    PromptMessageTool, PromptMessageContentType,
+    PromptMessageTool,
 )
 from dify_plugin.entities.tool import (
     LogMetadata,
@@ -28,7 +27,7 @@ from dify_plugin.interfaces.agent import (
 )
 from pydantic import BaseModel
 
-from output_parser.cot_output_parser import CotAgentOutputParser
+from output_parser.cot_output_parser import CotAgentOutputParser, DeltaFinalAnswer
 from prompt.template import REACT_PROMPT_TEMPLATES
 from utils.mcp_client import McpClients
 
@@ -147,6 +146,7 @@ class ReActAgentStrategy(AgentStrategy):
         iteration_step = 1
         max_iteration_steps = react_params.maximum_iterations
         run_agent_state = True
+        have_yield_final_answer = False
         llm_usage: dict[str, Optional[LLMUsage]] = {"usage": None}
         final_answer = ""
         empty_answer = "I am thinking about how to help you"  # the default answer when llm didn't response right format
@@ -265,7 +265,10 @@ class ReActAgentStrategy(AgentStrategy):
             yield model_log
 
             for chunk in react_chunks:
-                if isinstance(chunk, AgentScratchpadUnit.Action):
+                if isinstance(chunk, DeltaFinalAnswer):
+                    have_yield_final_answer = True
+                    yield self.create_text_message(chunk.delta)
+                elif isinstance(chunk, AgentScratchpadUnit.Action):
                     action = chunk
                     # detect action
                     assert scratchpad.agent_response is not None
@@ -423,8 +426,9 @@ class ReActAgentStrategy(AgentStrategy):
         # All MCP Client close
         if mcp_clients:
             mcp_clients.close()
-
-        yield self.create_text_message(final_answer)
+        # skip yielding final_answer if already have
+        if not have_yield_final_answer:
+            yield self.create_text_message(final_answer)
         yield self.create_json_message(
             {
                 "execution_metadata": {
