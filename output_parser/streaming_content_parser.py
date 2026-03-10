@@ -250,4 +250,8 @@ class StreamingContentParser:
             if not isinstance(content, str):
                 continue
 
-            yield from self.feed(content)
+            for block in  self.feed(content):
+                if block is None:
+                    continue
+                yield block
+
