@@ -176,3 +176,10 @@ cython_debug/
 
 # Windows
 Thumbs.db
+
+.github/
+.ruff_cache/
+
+# Claude stuff
+CLAUDE.md
+.claude/
