@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from output_parser.cot_output_parser import CotAgentOutputParser, DeltaFinalAnswer
 from prompt.template import REACT_PROMPT_TEMPLATES
+from strategies.base import FilterHistoryMessageByModelFeaturesMixin
 from utils.mcp_client import McpClients
 
 ignore_observation_providers = ["wenxin"]
@@ -54,7 +55,7 @@ class AgentPromptEntity(BaseModel):
     next_iteration: str
 
 
-class ReActAgentStrategy(AgentStrategy):
+class ReActAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, AgentStrategy):
     def __init__(self, runtime, session):
         super().__init__(runtime, session)
         self.query = ""
@@ -97,37 +98,6 @@ class ReActAgentStrategy(AgentStrategy):
 
         return SystemPromptMessage(content=system_prompt)
 
-    def _iter_cleanup_history_prompt_messages(self, model: AgentModelConfig):
-        """
-        remove history_prompt_message if model not support
-        :param model
-        :return:
-        """
-        for msg in model.history_prompt_messages:
-            if isinstance(msg.content, list):
-                filtered_content = [
-                    item
-                    for item in msg.content
-                    if (
-                            item.type == PromptMessageContentType.TEXT
-                            or (item.type in {
-                                PromptMessageContentType.IMAGE, PromptMessageContentType.VIDEO,
-                                PromptMessageContentType.DOCUMENT,
-                            } and ModelFeature.VISION in model.entity.features)
-                            or (item.type == PromptMessageContentType.AUDIO and ModelFeature.AUDIO in model.entity.features)
-                            or (item.type == PromptMessageContentType.VIDEO and ModelFeature.VIDEO in model.entity.features)
-                            or (item.type == PromptMessageContentType.DOCUMENT and ModelFeature.DOCUMENT in model.entity.features)
-                    )
-                ]
-                new_msg = msg.__class__(
-                    role=msg.role,
-                    content=filtered_content,
-                    name=msg.name,
-                )
-                yield new_msg
-            else:
-                yield msg
-
 
     def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
         """
@@ -150,7 +120,6 @@ class ReActAgentStrategy(AgentStrategy):
         llm_usage: dict[str, Optional[LLMUsage]] = {"usage": None}
         final_answer = ""
         empty_answer = "I am thinking about how to help you"  # the default answer when llm didn't response right format
-        prompt_messages = []
 
         # Init model
         model = react_params.model
@@ -536,11 +505,17 @@ class ReActAgentStrategy(AgentStrategy):
             try:
                 tool_call_args = orjson.loads(tool_call_args)
             except orjson.JSONDecodeError as e:
-                params = [
-                    param.name
-                    for param in tool_instance.parameters
-                    if param.form == ToolParameter.ToolParameterForm.LLM
-                ]
+                if tool_instance is not None:
+                    params = [
+                        param.name
+                        for param in tool_instance.parameters
+                        if param.form == ToolParameter.ToolParameterForm.LLM
+                    ]
+                else:
+                    params = [
+                        param
+                        for param in mcp_tool_instance.get('inputSchema', {}).get('properties', {}).keys()
+                    ]
                 if len(params) > 1:
                     raise ValueError("tool call args is not a valid json string") from e
                 tool_call_args = {params[0]: tool_call_args} if len(params) == 1 else {}
