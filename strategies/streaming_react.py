@@ -26,7 +26,7 @@ from dify_plugin.entities.model.llm import LLMModelConfig, LLMUsage
 from dify_plugin.entities.model.message import (
     PromptMessage,
     SystemPromptMessage,
-    UserPromptMessage,
+    UserPromptMessage, AssistantPromptMessage,
 )
 from dify_plugin.entities.provider_config import LogMetadata
 from dify_plugin.entities.tool import (
@@ -364,10 +364,6 @@ class StreamingReactAgentStrategy(
                 }
             tool_descriptions.append(tool_desc)
 
-        # Format scratchpad as string
-        scratchpad_str = self._format_scratchpad(scratchpad)
-        history_messages = self._iter_cleanup_history_prompt_messages(model)
-
         # Build system prompt
         system_prompt = STREAMING_CONTENT_PROMPT_TEMPLATES["english"]["chat"]["prompt"]
         system_prompt = system_prompt.replace("{{instruction}}", instruction)
@@ -376,15 +372,22 @@ class StreamingReactAgentStrategy(
             orjson.dumps(tool_descriptions).decode('utf-8') if tool_descriptions else "No tools available."
         )
 
-        # Add scratchpad if exists
-        if scratchpad_str:
+        # Format scratchpad as string
+        scratchpad_str = self._format_scratchpad(scratchpad)
+        if not scratchpad_str:
+            assistant_messages = []
+        else:
             scratchpad_template = STREAMING_CONTENT_PROMPT_TEMPLATES["english"]["chat"]["agent_scratchpad"]
-            system_prompt += scratchpad_template.replace("{{tool_results}}", scratchpad_str)
+            assistant_message = AssistantPromptMessage(content=scratchpad_template.replace("{{tool_results}}", scratchpad_str))
+            assistant_messages = [assistant_message]
+
+        history_messages = self._iter_cleanup_history_prompt_messages(model)
 
         messages: list[PromptMessage] = [
             SystemPromptMessage(content=system_prompt),
             *history_messages,
             UserPromptMessage(content=query),
+            *assistant_messages,
         ]
 
         return messages
