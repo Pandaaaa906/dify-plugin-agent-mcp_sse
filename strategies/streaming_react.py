@@ -15,13 +15,13 @@ Key features:
 """
 import logging
 import time
-from collections.abc import Generator, Mapping
-from typing import Any, Optional, cast
+from typing import Any, Optional, cast, Generator, Mapping
 
 import orjson
 import pydantic
 from dify_plugin.config.logger_format import plugin_logger_handler
 from dify_plugin.entities.agent import AgentInvokeMessage
+from dify_plugin.entities.invoke_message import InvokeMessage
 from dify_plugin.entities.model.llm import LLMModelConfig, LLMUsage
 from dify_plugin.entities.model.message import (
     PromptMessage,
@@ -86,7 +86,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
     providing a responsive user experience.
     """
 
-    def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
+    def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage | InvokeMessage, None, None]:
         """Run StreamingReact agent application."""
 
         # Validate parameters
@@ -189,9 +189,8 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             pending_tool_calls: list[ToolUseBlock] = []
             current_usage: Optional[LLMUsage] = None
             text_started = False
+            stop_reason = None
 
-            logger.debug(f"invoking llm")
-            logger.warning(f"invoking llm")
             chunks = self.session.model.llm.invoke(
                 model_config=LLMModelConfig(**model.model_dump(mode="json")),
                 prompt_messages=prompt_messages,
@@ -215,18 +214,20 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
 
                 elif isinstance(parsed, ToolUseBlock):
                     pending_tool_calls.append(parsed)
-                    run_agent_state = True
 
                 elif isinstance(parsed, TextDelta):
-                    if not text_started:
-                        text_started = True
-                        final_answer_delivered = True
-                    # Stream text to user immediately
-                    yield self.create_text_message(parsed.text)
+                    if pending_tool_calls and not current_thinking:
+                        current_thinking = parsed.full
+                    elif not pending_tool_calls:
+                        if not text_started:
+                            text_started = True
+                            final_answer_delivered = True
+                        # Stream text to user immediately
+                        yield self.create_text_message(parsed.text)
 
                 elif isinstance(parsed, StopReason):
                     # Stop reason detected
-                    pass
+                    stop_reason = parsed
 
             # Get usage from usage_dict
             if "usage" in usage_dict and usage_dict["usage"] is not None:
@@ -238,6 +239,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                 log=model_log,
                 data={
                     "thought": current_thinking,
+                    "stop_reason": stop_reason,
                     "tool_calls": [
                         {"id": tc.id, "name": tc.name, "input": tc.input}
                         for tc in pending_tool_calls
@@ -258,16 +260,17 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             # Execute tools if any
             tool_results = []
             if pending_tool_calls:
+                run_agent_state = True
                 for tool_call in pending_tool_calls:
                     # Execute each tool with logging
-                    result = yield from self._execute_single_tool(
+                    yield from self._execute_single_tool(
                         tool_call=tool_call,
                         tool_instances=tool_instances,
                         mcp_clients=mcp_clients,
                         mcp_tool_instances=mcp_tool_instances,
                         parent_log=round_log,
+                        tool_results=tool_results,
                     )
-                    tool_results.append(result)
 
                 # Add to scratchpad for next iteration
                 agent_scratchpad.append({
@@ -281,12 +284,22 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                     "role": "tool",
                     "content": tool_results
                 })
+            else:
+                if current_thinking:
+                    agent_scratchpad.append({
+                        "role": "assistant_thought",
+                        "content": current_thinking,
+                    })
+                if not final_answer_delivered:
+                    # retry if llm didn't response final answer or tool use
+                    run_agent_state = True
 
             yield self.finish_log_message(
                 log=round_log,
                 data={
+                    "stop_reason": stop_reason,
                     "thought": current_thinking,
-                    "observation": str(tool_results),
+                    "observation": self._format_scratchpad(agent_scratchpad),
                 },
                 metadata={
                     LogMetadata.STARTED_AT: round_started_at,
@@ -346,6 +359,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
 
         # Format scratchpad as string
         scratchpad_str = self._format_scratchpad(scratchpad)
+        history_messages = self._iter_cleanup_history_prompt_messages(model)
 
         # Build system prompt
         system_prompt = STREAMING_CONTENT_PROMPT_TEMPLATES["english"]["chat"]["prompt"]
@@ -354,8 +368,6 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             "{{tools}}",
             orjson.dumps(tool_descriptions).decode('utf-8') if tool_descriptions else "No tools available."
         )
-        system_prompt = system_prompt.replace("{{historic_messages}}", "")
-        system_prompt = system_prompt.replace("{{query}}", query)
 
         # Add scratchpad if exists
         if scratchpad_str:
@@ -364,12 +376,14 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
 
         messages: list[PromptMessage] = [
             SystemPromptMessage(content=system_prompt),
+            *history_messages,
             UserPromptMessage(content=query),
         ]
 
         return messages
 
-    def _format_scratchpad(self, scratchpad: list[dict[str, Any]]) -> str:
+    @staticmethod
+    def _format_scratchpad(scratchpad: list[dict[str, Any]]) -> str:
         """Format scratchpad entries as a string."""
         if not scratchpad:
             return ""
@@ -379,7 +393,9 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             role = entry.get("role", "")
             content = entry.get("content", [])
 
-            if role == "assistant":
+            if role == "assistant_thought":
+                parts.append(f"Assistant Thoughts: {content}")
+            elif role == "assistant":
                 parts.append("Assistant decided to use tools:")
                 for block in content:
                     if block.get("type") == "tool_use":
@@ -391,7 +407,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                     if block.get("type") == "tool_result":
                         parts.append(f"  - {block.get('tool_use_id')}: {block.get('content', '')}")
 
-        return "\n".join(parts)
+        return "\n\n\n".join(parts)
 
     def _execute_single_tool(
         self,
@@ -400,7 +416,8 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         mcp_clients: Optional[McpClients],
         mcp_tool_instances: Mapping[str, dict],
         parent_log: Any,
-    ) -> Generator[AgentInvokeMessage, None, dict[str, Any]]:
+        tool_results: list,
+    ) -> Generator[InvokeMessage,  None, None]:
         """
         Execute a single tool call with logging.
 
@@ -475,12 +492,14 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             },
         )
 
-        return {
-            "type": "tool_result",
-            "tool_use_id": tool_call.id,
-            "content": output,
-            "is_error": is_error,
-        }
+        tool_results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_call.id,
+                "content": output,
+                "is_error": is_error,
+            }
+        )
 
     def _format_mcp_result(self, result: list[dict]) -> str:
         """Format MCP tool result as string."""
@@ -517,10 +536,13 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             elif response.type == ToolInvokeMessage.MessageType.JSON:
                 json_obj = cast(ToolInvokeMessage.JsonMessage, response.message).json_object
                 result_parts.append(orjson.dumps(json_obj).decode('utf-8'))
+            elif response.type == ToolInvokeMessage.MessageType.VARIABLE:
+                variable = cast(ToolInvokeMessage.VariableMessage, response.message)
+                result_parts.append(f"{variable.variable_name} = {variable.variable_value}")
             else:
                 result_parts.append(str(response.message))
 
-        return "\n".join(result_parts)
+        return "\n\n".join(result_parts)
 
     @staticmethod
     def _init_prompt_mcp_tools(mcp_tools: list[dict]) -> list[Any]:
