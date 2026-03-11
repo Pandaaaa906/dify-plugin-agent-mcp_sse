@@ -15,7 +15,7 @@ Key features:
 """
 import logging
 import time
-from typing import Any, Optional, cast, Generator, Mapping, List
+from typing import Any, Optional, cast, Generator, Mapping, Tuple
 
 import orjson
 import pydantic
@@ -49,7 +49,8 @@ from output_parser.streaming_content_parser import (
 )
 from prompt.streaming_content_template import STREAMING_CONTENT_PROMPT_TEMPLATES
 from strategies.base import FilterHistoryMessageByModelFeaturesMixin
-from strategies.types import ScratchpadEntry
+from utils.agent_scratchpad_storage import AgentScratchpadStorageMixin
+from utils.types import ScratchpadEntry
 from utils.mcp_client import McpClients
 
 
@@ -69,7 +70,11 @@ logger.addHandler(plugin_logger_handler)
 logger.setLevel(logging.DEBUG)
 
 
-class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, AgentStrategy):
+class StreamingReactAgentStrategy(
+    AgentScratchpadStorageMixin,
+    FilterHistoryMessageByModelFeaturesMixin,
+    AgentStrategy
+):
     """
     StreamingReact Agent Strategy with Content Blocks.
 
@@ -98,9 +103,9 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         # Initialize state
         query = params.query
         instruction = params.instruction or ""
-        agent_scratchpad: List[ScratchpadEntry] = []
         iteration_step = 1
         max_iterations = params.maximum_iterations
+        self.__max_scratchpad = max_iterations
         run_agent_state = True
         llm_usage: dict[str, Optional[LLMUsage]] = {"usage": None}
         final_answer_delivered = False
@@ -163,7 +168,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                 query=query,
                 instruction=instruction,
                 tools=prompt_messages_tools,
-                scratchpad=agent_scratchpad,
+                scratchpad=self.agent_scratchpad,
                 model=model,
             )
 
@@ -219,12 +224,11 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                 elif isinstance(parsed, TextDelta):
                     if pending_tool_calls and not current_thinking:
                         current_thinking = parsed.full
-                    elif not pending_tool_calls:
-                        if not text_started:
-                            text_started = True
-                            final_answer_delivered = True
-                        # Stream text to user immediately
-                        yield self.create_text_message(parsed.text)
+                    if not text_started:
+                        text_started = True
+                        final_answer_delivered = True
+                    # Stream text to user immediately
+                    yield self.create_text_message(parsed.text)
 
                 elif isinstance(parsed, StopReason):
                     # Stop reason detected
@@ -261,7 +265,6 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
             # Execute tools if any
             tool_results = []
             if pending_tool_calls:
-                run_agent_state = True
                 for tool_call in pending_tool_calls:
                     # Execute each tool with logging
                     yield from self._execute_single_tool(
@@ -274,33 +277,36 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
                     )
 
                 # Add to scratchpad for next iteration
-                agent_scratchpad.append({
+                self.append_agent_scratchpad({
                     "role": "assistant",
                     "content": [
                         {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
                         for tc in pending_tool_calls
                     ]
                 })
-                agent_scratchpad.append({
+                self.append_agent_scratchpad({
                     "role": "tool",
                     "content": tool_results
                 })
+            elif current_thinking:
+                self.append_agent_scratchpad({
+                    "role": "assistant_thought",
+                    "content": current_thinking,
+                })
+
+            if final_answer_delivered:
+                run_agent_state = False
+            elif pending_tool_calls:
+                run_agent_state = True
             else:
-                if current_thinking:
-                    agent_scratchpad.append({
-                        "role": "assistant_thought",
-                        "content": current_thinking,
-                    })
-                if not final_answer_delivered:
-                    # retry if llm didn't response final answer or tool use
-                    run_agent_state = True
+                run_agent_state = True
 
             yield self.finish_log_message(
                 log=round_log,
                 data={
                     "stop_reason": stop_reason,
                     "thought": current_thinking,
-                    "observation": self._format_scratchpad(agent_scratchpad),
+                    "observation": self._format_scratchpad(self.agent_scratchpad),
                 },
                 metadata={
                     LogMetadata.STARTED_AT: round_started_at,
@@ -340,7 +346,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         query: str,
         instruction: str,
         tools: list[Any],
-        scratchpad: List[ScratchpadEntry],
+        scratchpad: Tuple[ScratchpadEntry],
         model: AgentModelConfig,
     ) -> list[PromptMessage]:
         """Organize prompt messages for the model."""
@@ -384,7 +390,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         return messages
 
     @staticmethod
-    def _format_scratchpad(scratchpad: List[ScratchpadEntry]) -> str:
+    def _format_scratchpad(scratchpad: Tuple[ScratchpadEntry]) -> str:
         """Format scratchpad entries as a string."""
         if not scratchpad:
             return ""
