@@ -9,7 +9,9 @@ Inspired by Anthropic Claude API Message format with content blocks:
 Reference: https://docs.anthropic.com/en/api/messages
 """
 
-STREAMING_REACT_PROMPT_TEMPLATE = """You are an AI assistant with access to tools. {{instruction}}
+STREAMING_REACT_PROMPT_TEMPLATE = """You are an AI assistant with access to tools. 
+instructions of final answer:
+{{instruction}}
 
 Follow the response format below.
 
@@ -43,7 +45,6 @@ Respond in the following JSON structure:
 
 - `"tool_use"`: You made tool calls and need to wait for results
 - `"end_turn"`: You have the final answer, no more tool calls needed
-- `"max_tokens"`: You hit the token limit
 
 ## Rules
 
@@ -68,14 +69,6 @@ Respond in the following JSON structure:
 ## Available Tools
 
 {{tools}}
-
-## Conversation History
-
-{{historic_messages}}
-
-## Current Query
-
-{{query}}
 
 Begin responding in the JSON format above:"""
 
