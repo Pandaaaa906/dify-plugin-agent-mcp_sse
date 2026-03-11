@@ -15,7 +15,7 @@ Key features:
 """
 import logging
 import time
-from typing import Any, Optional, cast, Generator, Mapping
+from typing import Any, Optional, cast, Generator, Mapping, List
 
 import orjson
 import pydantic
@@ -49,6 +49,7 @@ from output_parser.streaming_content_parser import (
 )
 from prompt.streaming_content_template import STREAMING_CONTENT_PROMPT_TEMPLATES
 from strategies.base import FilterHistoryMessageByModelFeaturesMixin
+from strategies.types import ScratchpadEntry
 from utils.mcp_client import McpClients
 
 
@@ -97,7 +98,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         # Initialize state
         query = params.query
         instruction = params.instruction or ""
-        agent_scratchpad: list[dict[str, Any]] = []
+        agent_scratchpad: List[ScratchpadEntry] = []
         iteration_step = 1
         max_iterations = params.maximum_iterations
         run_agent_state = True
@@ -339,7 +340,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         query: str,
         instruction: str,
         tools: list[Any],
-        scratchpad: list[dict[str, Any]],
+        scratchpad: List[ScratchpadEntry],
         model: AgentModelConfig,
     ) -> list[PromptMessage]:
         """Organize prompt messages for the model."""
@@ -383,7 +384,7 @@ class StreamingReactAgentStrategy(FilterHistoryMessageByModelFeaturesMixin, Agen
         return messages
 
     @staticmethod
-    def _format_scratchpad(scratchpad: list[dict[str, Any]]) -> str:
+    def _format_scratchpad(scratchpad: List[ScratchpadEntry]) -> str:
         """Format scratchpad entries as a string."""
         if not scratchpad:
             return ""
