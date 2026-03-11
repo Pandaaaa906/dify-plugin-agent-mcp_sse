@@ -5,6 +5,14 @@ from dify_plugin.entities.model.message import PromptMessageContentType, PromptM
 from dify_plugin.interfaces.agent import AgentModelConfig
 
 
+MODEL_FEATURES_MAPPING = {
+    PromptMessageContentType.IMAGE: {ModelFeature.VISION, },
+    PromptMessageContentType.VIDEO: {ModelFeature.VISION, ModelFeature.VIDEO, },
+    PromptMessageContentType.DOCUMENT: {ModelFeature.VISION, ModelFeature.DOCUMENT, },
+    PromptMessageContentType.AUDIO: {ModelFeature.AUDIO, },
+}
+
+
 class FilterHistoryMessageByModelFeaturesMixin:
 
     @staticmethod
@@ -14,6 +22,7 @@ class FilterHistoryMessageByModelFeaturesMixin:
         :param model
         :return:
         """
+        model_features = set(model.entity.features)
         for msg in model.history_prompt_messages:
             if isinstance(msg.content, list):
                 filtered_content = [
@@ -21,13 +30,7 @@ class FilterHistoryMessageByModelFeaturesMixin:
                     for item in msg.content
                     if (
                             item.type == PromptMessageContentType.TEXT
-                            or (item.type in {
-                        PromptMessageContentType.IMAGE, PromptMessageContentType.VIDEO,
-                        PromptMessageContentType.DOCUMENT,
-                    } and ModelFeature.VISION in model.entity.features)
-                            or (item.type == PromptMessageContentType.AUDIO and ModelFeature.AUDIO in model.entity.features)
-                            or (item.type == PromptMessageContentType.VIDEO and ModelFeature.VIDEO in model.entity.features)
-                            or (item.type == PromptMessageContentType.DOCUMENT and ModelFeature.DOCUMENT in model.entity.features)
+                            or bool(MODEL_FEATURES_MAPPING[item.type] & model_features)
                     )
                 ]
                 new_msg = msg.__class__(
