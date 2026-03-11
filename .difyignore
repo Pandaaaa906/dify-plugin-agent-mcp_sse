@@ -183,3 +183,5 @@ Thumbs.db
 # Claude stuff
 CLAUDE.md
 .claude/
+
+test/
