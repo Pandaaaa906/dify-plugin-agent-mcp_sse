@@ -23,6 +23,7 @@ from dify_plugin.entities.model.llm import LLMResultChunk
 
 logger = logging.getLogger(__name__)
 logger.addHandler(plugin_logger_handler)
+logger.setLevel(plugin_logger_handler.level)
 
 
 class StopReason(Enum):
@@ -55,6 +56,7 @@ class ToolUseBlock:
 class TextDelta:
     """Represents an incremental text update for streaming final answer."""
     text: str
+    full: str
 
 
 class StreamingContentParser:
@@ -89,7 +91,9 @@ class StreamingContentParser:
         self._text_progress: dict[int, int] = {}  # text block index -> yielded length
         self._thinking_progress: dict[int, int] = {}  # thinking block index -> yielded length
         self._auto_tool_id_counter: int = 0
-        self.all_contents_processed = False
+        self._in_stream_block = False
+        self._skip_count: int = 0
+        self._max_skip_count: int = 10
 
     def _generate_tool_id(self) -> str:
         """Generate an auto-incrementing tool ID when model doesn't provide one."""
@@ -112,8 +116,16 @@ class StreamingContentParser:
         """
         self.buffer += text_chunk
 
-        if self.all_contents_processed:
+        # skip if not in stream bloc until exceed _max_skip_count
+        if (
+                not self.stop_reason
+                and not self._in_stream_block
+                and self._max_skip_count > self._skip_count
+        ):
+            self._skip_count += 1
             return
+        self._skip_count = 0
+        self._in_stream_block = False
 
         # Attempt to parse with json_repair for stable results
         try:
@@ -153,11 +165,11 @@ class StreamingContentParser:
             block_is_complete = (self.start_idx + 1 < len(content)) or self.stop_reason is not None
 
             if block_is_complete and block_type == "thinking":
-                if b := self._handle_thinking_block(self.start_idx, block):
-                    yield b
+                yield from self._handle_thinking_block(self.start_idx, block)
             elif block_type == "text":
                 yield from self._handle_text_block(self.start_idx, block)
                 if not block_is_complete:
+                    self._in_stream_block = True
                     break
             elif block_is_complete and block_type == "tool_use":
                 yield from self._handle_tool_use_block(block)
@@ -170,8 +182,11 @@ class StreamingContentParser:
 
         yield self.stop_reason
 
-    def _handle_thinking_block(self, idx: int, block: dict) -> ThinkingBlock | None:
-        """Handle thinking block with incremental streaming support."""
+    def _handle_thinking_block(self, idx: int, block: dict) -> Generator[ThinkingBlock, None, None]:
+        """
+        Handle thinking block with incremental streaming support.
+        TODO 重新加回流式返回
+        """
         thinking_text = block.get("thinking", "")
         # prev_len = self._thinking_progress.get(idx, 0)
 
@@ -180,8 +195,7 @@ class StreamingContentParser:
         #     self._thinking_progress[idx] = len(thinking_text)
         #     return ThinkingDelta(thinking=delta)
         if thinking_text:
-            return ThinkingBlock(thinking=thinking_text)
-        return None
+            yield ThinkingBlock(thinking=thinking_text)
 
     def _handle_text_block(self, idx: int, block: dict) -> Generator[TextDelta, None, None]:
         """Handle text block with incremental streaming."""
@@ -191,7 +205,7 @@ class StreamingContentParser:
         if len(text_content) > prev_len:
             delta = text_content[prev_len:]
             self._text_progress[idx] = len(text_content)
-            yield TextDelta(text=delta)
+            yield TextDelta(text=delta, full=text_content)
 
     def _handle_tool_use_block(self, block: dict) -> Generator[ToolUseBlock, None, None]:
         """Handle tool_use block - only yield when complete."""
@@ -208,7 +222,11 @@ class StreamingContentParser:
         # Ensure tool_input is a dict
         if isinstance(tool_input, str):
             try:
-                tool_input = json_repair.loads(tool_input, skip_json_loads=True)
+                parsed = json_repair.loads(tool_input, skip_json_loads=True)
+                if isinstance(parsed, dict):
+                    tool_input = parsed
+                else:
+                    tool_input = {"raw_input": tool_input}
             except Exception:
                 tool_input = {"raw_input": tool_input}
         elif not isinstance(tool_input, dict):
@@ -254,4 +272,6 @@ class StreamingContentParser:
                 if block is None:
                     continue
                 yield block
-
+        self._in_stream_block = True
+        yield from self.feed("")
+        logger.info(f"LLM response: {self.buffer}")
