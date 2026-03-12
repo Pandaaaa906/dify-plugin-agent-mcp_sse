@@ -48,7 +48,7 @@ from output_parser.streaming_content_parser import (
     ToolUseBlock,
 )
 from prompt.streaming_content_template import STREAMING_CONTENT_PROMPT_TEMPLATES
-from strategies.base import FilterHistoryMessageByModelFeaturesMixin
+from utils.filter_history_message import FilterHistoryMessageByModelFeaturesMixin
 from utils.agent_scratchpad_storage import AgentScratchpadStorageMixin
 from utils.types import ScratchpadEntry
 from utils.mcp_client import McpClients

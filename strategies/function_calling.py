@@ -32,7 +32,7 @@ from dify_plugin.interfaces.agent import (
 )
 from pydantic import BaseModel
 
-from strategies.base import FilterHistoryMessageByModelFeaturesMixin
+from utils.filter_history_message import FilterHistoryMessageByModelFeaturesMixin
 from utils.mcp_client import McpClients
 
 

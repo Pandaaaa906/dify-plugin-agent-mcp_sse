@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from output_parser.cot_output_parser import CotAgentOutputParser
 from prompt.template import REACT_PROMPT_TEMPLATES
-from strategies.base import FilterHistoryMessageByModelFeaturesMixin
+from utils.filter_history_message import FilterHistoryMessageByModelFeaturesMixin
 from utils.mcp_client import McpClients
 
 ignore_observation_providers = ["wenxin"]
